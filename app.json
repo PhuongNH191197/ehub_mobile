@@ -17,6 +17,9 @@
       "bundleIdentifier": "com.elcom.app.ehub",
       "buildNumber": "1.0.0",
       "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        },
         "ITSAppUsesNonExemptEncryption": false
       }
     },
