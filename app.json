@@ -20,6 +20,7 @@
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
         },
+        "NSLocalNetworkUsageDescription": "Ehub needs access to your local network to connect to your desktop AI orchestrator.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
