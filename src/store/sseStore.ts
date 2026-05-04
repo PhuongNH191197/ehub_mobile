@@ -80,6 +80,7 @@ interface SseState {
   token: string;
   isConnected: boolean;
   isConnecting: boolean;
+  isDeliberateDisconnect: boolean;
   error: string | null;
 
   // Domain state
@@ -127,6 +128,27 @@ function closeStream() {
   if (_es) { _es.close(); _es = null; }
 }
 
+// ── Parallel reachability pre-check ──────────────────────────────────────────
+// Pings all candidate URLs simultaneously (HEAD /api/v1/stream, 2.5s timeout).
+// Any URL that responds — even with 401/405 — is reachable.
+// This avoids the 15s × N sequential timeout when the client is Tailscale-only
+// and none of the LAN IPs are accessible.
+async function findReachableUrls(urls: string[], timeoutMs = 2500): Promise<string[]> {
+  const checks = urls.map(async (url) => {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      await fetch(`${url}/api/v1/stream`, { method: 'HEAD', signal: controller.signal });
+      clearTimeout(timer);
+      return url;
+    } catch {
+      return null;
+    }
+  });
+  const results = await Promise.all(checks);
+  return urls.filter((_, i) => results[i] !== null);
+}
+
 // ── REST helper ───────────────────────────────────────────────────────────────
 
 async function restPost(url: string, token: string, body: unknown): Promise<any> {
@@ -169,6 +191,7 @@ export const useSseStore = create<SseState>((set, get) => ({
   token: '',
   isConnected: false,
   isConnecting: false,
+  isDeliberateDisconnect: false,
   error: null,
   activeHitlRequest: null,
   messages: [],
@@ -193,6 +216,7 @@ export const useSseStore = create<SseState>((set, get) => ({
   },
 
   connect: (urls: string[], token: string) => {
+    set({ isDeliberateDisconnect: false });
     _deliberateDisconnect = false;
     _reconnectAttempts = 0;
     closeStream();
@@ -203,13 +227,18 @@ export const useSseStore = create<SseState>((set, get) => ({
       return;
     }
 
+    // Working URL list — reordered by reachability pre-check (reachable URLs first).
+    // Declared as `let` so the findReachableUrls callback can replace it before
+    // tryConnect(0) is called.
+    let connectUrls = [...urls];
+
     const tryConnect = (urlIndex: number) => {
-      if (urlIndex >= urls.length) {
+      if (urlIndex >= connectUrls.length) {
         urlIndex = 0;
         _reconnectAttempts++;
         if (_reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
           set({
-            error: `Cannot connect.\n\nTried:\n• ${urls.join('\n• ')}\n\nPlease check your network.`,
+            error: `Cannot connect.\n\nTried:\n• ${connectUrls.join('\n• ')}\n\nPlease check your network.`,
             isConnecting: false,
           });
           return;
@@ -220,7 +249,7 @@ export const useSseStore = create<SseState>((set, get) => ({
         return;
       }
 
-      const rawUrl = urls[urlIndex];
+      const rawUrl = connectUrls[urlIndex];
       const baseUrl = rawUrl
         .replace(/^ws:\/\//, 'http://')
         .replace(/^wss:\/\//, 'https://')
@@ -228,7 +257,7 @@ export const useSseStore = create<SseState>((set, get) => ({
 
       const sseUrl = `${baseUrl}/api/v1/stream`;
       console.log(`[SSE] Connecting to ${sseUrl}`);
-      set({ isConnecting: true, currentBaseUrl: baseUrl, baseUrls: urls, token, error: null });
+      set({ isConnecting: true, currentBaseUrl: baseUrl, baseUrls: connectUrls, token, error: null });
 
       closeStream();
 
@@ -240,7 +269,8 @@ export const useSseStore = create<SseState>((set, get) => ({
       const es = new EventSource(sseUrlWithToken);
       _es = es;
 
-      // Timeout: 15s to allow for slow LAN/Tailscale connections
+      // Timeout: 6s — URLs have already been pre-qualified by findReachableUrls;
+      // a 6s SSE timeout is ample for slow Tailscale links.
       const connTimeout = setTimeout(() => {
         if (_es === es) {
           console.warn('[SSE] Connection timeout — trying next URL');
@@ -249,7 +279,7 @@ export const useSseStore = create<SseState>((set, get) => ({
           set({ isConnecting: false });
           tryConnect(urlIndex + 1);
         }
-      }, 15000);
+      }, 6000);
 
       es.addEventListener('open', () => {
         clearTimeout(connTimeout);
@@ -271,7 +301,7 @@ export const useSseStore = create<SseState>((set, get) => ({
       // Named SSE events from backend
       const knownEvents = ['connected', 'status', 'log', 'result', 'progress', 'approval_request', 'error', 'session_list', 'session_history'];
       for (const evtType of knownEvents) {
-        es.addEventListener(evtType, (e: any) => {
+        es.addEventListener(evtType as any, (e: any) => {
           try {
             const evt: SseEvent = JSON.parse(e.data);
             dispatchSseEvent(evtType, evt, set, get);
@@ -292,7 +322,22 @@ export const useSseStore = create<SseState>((set, get) => ({
       });
     };
 
-    tryConnect(0);
+    // Parallel reachability pre-check: probe all URLs simultaneously (2.5s max).
+    // Reachable URLs are sorted to the front of connectUrls so Tailscale clients
+    // don't wait N × 6s for unreachable LAN IPs before reaching their server.
+    set({ isConnecting: true, baseUrls: urls, token, error: null });
+    findReachableUrls(urls).then((reachable) => {
+      if (_deliberateDisconnect) return;
+      if (reachable.length > 0) {
+        // Reachable first, unreachable last — preserve relative order within each group
+        connectUrls = [
+          ...reachable,
+          ...urls.filter(u => !reachable.includes(u)),
+        ];
+        console.log(`[SSE] Reachability: ${reachable.length}/${urls.length} reachable`, reachable);
+      }
+      tryConnect(0);
+    });
   },
 
   // ── Disconnect ────────────────────────────────────────────────────────────
@@ -304,6 +349,7 @@ export const useSseStore = create<SseState>((set, get) => ({
     set({
       isConnected: false,
       isConnecting: false,
+      isDeliberateDisconnect: true,
       baseUrls: [],
       currentBaseUrl: '',
       token: '',

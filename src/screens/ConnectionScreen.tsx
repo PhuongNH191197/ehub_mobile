@@ -34,7 +34,7 @@ export function ConnectionScreen({ navigation }: any) {
   const [isScanning, setIsScanning] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
 
-  const { connect, isConnecting, isConnected, error, clearError } = useSseStore();
+  const { connect, isConnecting, isConnected, isDeliberateDisconnect, error, clearError, initStore } = useSseStore();
 
   // ── Normalise URL → http://host:9002 (accepts ws://, bare IP, etc.) ───────
   const normaliseUrl = (raw: string): string => {
@@ -80,6 +80,7 @@ export function ConnectionScreen({ navigation }: any) {
   useEffect(() => {
     (async () => {
       try {
+        await initStore(); // Load session ID
         const savedUrlsStr = await Storage.getItemAsync('ws_urls');
         const savedToken = await Storage.getItemAsync('ws_token');
         let urls: string[] = [];
@@ -101,7 +102,12 @@ export function ConnectionScreen({ navigation }: any) {
         }
 
         if (savedToken) setToken(savedToken);
-        if (urls.length > 0 && savedToken) connect(urls, savedToken);
+        
+        // *** FIX: Only auto-connect if NOT a deliberate disconnect (e.g. fresh app start)
+        const state = useSseStore.getState();
+        if (urls.length > 0 && savedToken && !state.isConnected && !state.isConnecting && !state.isDeliberateDisconnect) {
+          connect(urls, savedToken);
+        }
       } catch (e) { console.error('Load credentials failed', e); }
       finally { setIsLoading(false); }
     })();
