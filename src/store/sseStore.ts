@@ -80,7 +80,6 @@ interface SseState {
   token: string;
   isConnected: boolean;
   isConnecting: boolean;
-  isDeliberateDisconnect: boolean;
   error: string | null;
 
   // Domain state
@@ -191,7 +190,6 @@ export const useSseStore = create<SseState>((set, get) => ({
   token: '',
   isConnected: false,
   isConnecting: false,
-  isDeliberateDisconnect: false,
   error: null,
   activeHitlRequest: null,
   messages: [],
@@ -216,7 +214,6 @@ export const useSseStore = create<SseState>((set, get) => ({
   },
 
   connect: (urls: string[], token: string) => {
-    set({ isDeliberateDisconnect: false });
     _deliberateDisconnect = false;
     _reconnectAttempts = 0;
     closeStream();
@@ -349,7 +346,6 @@ export const useSseStore = create<SseState>((set, get) => ({
     set({
       isConnected: false,
       isConnecting: false,
-      isDeliberateDisconnect: true,
       baseUrls: [],
       currentBaseUrl: '',
       token: '',
